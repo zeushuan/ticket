@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup
 
 CAPTCHA_RETRY_MAX = 5
 CAPTCHA_LEN = 4
+HTTP_TIMEOUT = 20  # seconds for any single HTTP request
 
 BASE_URL = "https://irs.thsrc.com.tw"
 BOOKING_PAGE = f"{BASE_URL}/IMINT/?locale=tw"
@@ -82,7 +83,7 @@ class THSRBooker:
         return r
 
     def step1_load(self) -> bytes:
-        r = self.session.get(BOOKING_PAGE)
+        r = self.session.get(BOOKING_PAGE, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -103,7 +104,7 @@ class THSRBooker:
         elif captcha_url.startswith("//"):
             captcha_url = "https:" + captcha_url
 
-        cr = self.session.get(captcha_url)
+        cr = self.session.get(captcha_url, timeout=HTTP_TIMEOUT)
         cr.raise_for_status()
         return cr.content
 
@@ -132,7 +133,7 @@ class THSRBooker:
             "homeCaptcha:securityCode": captcha_answer,
             "SubmitButton": "開始查詢",
         }
-        r = self.session.post(self.s1_action, data=data)
+        r = self.session.post(self.s1_action, data=data, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         self._raise_on_errors(soup, "Step 1")
@@ -178,7 +179,7 @@ class THSRBooker:
             "TrainQueryDataViewPanel:TrainGroup": train_value,
             "SubmitButton": "確認車次",
         }
-        r = self.session.post(self.s2_action, data=data)
+        r = self.session.post(self.s2_action, data=data, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         self._raise_on_errors(soup, "Step 2")
@@ -207,7 +208,7 @@ class THSRBooker:
             "agree": "on",
             "SubmitButton": "確認訂位",
         }
-        r = self.session.post(self.s3_action, data=data)
+        r = self.session.post(self.s3_action, data=data, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         self._raise_on_errors(soup, "Step 3")

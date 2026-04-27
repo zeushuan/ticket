@@ -379,28 +379,32 @@ def render_querying() -> None:
     log_event("info", f"刷票 #{poll_n}: 載入查詢頁")
 
     try:
-        captcha_bytes = booker.step1_load()
+        with st.spinner("連線高鐵網站中…"):
+            captcha_bytes = booker.step1_load()
+        log_event("info", f"已取得驗證碼圖 ({len(captcha_bytes):,} bytes)")
     except Exception as e:
-        log_event("error", f"載入頁面失敗: {e}")
+        log_event("error", f"載入頁面失敗: {type(e).__name__}: {e}")
         _to_error(f"載入頁面失敗: {e}", exc=e)
         return
 
     captcha = ""
     if not f.get("manual_captcha"):
         try:
-            solver = CaptchaSolver()
-            if solver.available:
-                captcha = solver.solve(captcha_bytes)
-                log_event("info", f"自動辨識: {captcha or '(空)'} "
-                                  f"(長度 {len(captcha)})")
-            else:
-                log_event("warn", "ddddocr 不可用，需手動輸入驗證碼")
+            with st.spinner("自動辨識驗證碼中…"):
+                solver = CaptchaSolver()
+                if solver.available:
+                    captcha = solver.solve(captcha_bytes)
+                    log_event("info", f"自動辨識: {captcha or '(空)'} "
+                                      f"(長度 {len(captcha)})")
+                else:
+                    log_event("warn", "ddddocr 不可用，需手動輸入驗證碼")
         except Exception as e:
             log_event("error", f"驗證碼辨識例外: {e}")
 
     if captcha and len(captcha) == CAPTCHA_LEN:
         try:
-            trains = booker.step1_submit(_query_params(f), captcha)
+            with st.spinner("送出查詢…"):
+                trains = booker.step1_submit(_query_params(f), captcha)
             log_event("success", f"查詢成功，回傳 {len(trains)} 班車")
             _post_query(trains)
             return
@@ -411,7 +415,7 @@ def render_querying() -> None:
                 return
             log_event("warn", f"驗證碼錯誤: {e}")
         except Exception as e:
-            log_event("error", f"查詢例外: {e}")
+            log_event("error", f"查詢例外: {type(e).__name__}: {e}")
             _to_error(f"查詢例外: {e}", exc=e)
             return
 
@@ -533,14 +537,16 @@ def render_submitting() -> None:
     st.info(f"確認車次 {chosen['train_no']}…")
     log_event("info", f"確認車次 {chosen['train_no']} ({chosen['depart']} → {chosen['arrive']})")
     try:
-        booker.step2_submit(chosen["value"])
+        with st.spinner("確認車次…"):
+            booker.step2_submit(chosen["value"])
         st.info("送出乘客資料…")
         log_event("info", "送出乘客資料")
-        result = booker.step3_submit({
-            "id_number": f["id_number"],
-            "phone": f["phone"],
-            "email": f["email"],
-        })
+        with st.spinner("送出乘客資料…"):
+            result = booker.step3_submit({
+                "id_number": f["id_number"],
+                "phone": f["phone"],
+                "email": f["email"],
+            })
         log_event("success", f"訂位成功 PNR={result.get('pnr') or '?'}")
         st.session_state.result = result
         st.session_state.step = "done"
