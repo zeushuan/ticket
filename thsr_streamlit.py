@@ -50,6 +50,12 @@ DEFAULTS = {
 }
 
 
+@st.cache_resource(show_spinner="初次載入 ddddocr 模型 (約 5–20 秒)…")
+def get_captcha_solver() -> CaptchaSolver:
+    """Cache the solver across reruns so the ONNX model loads only once."""
+    return CaptchaSolver()
+
+
 def log_event(level: str, msg: str) -> None:
     """Append to in-page activity log; level in {info, warn, error, success}."""
     ts = time.strftime("%H:%M:%S")
@@ -252,6 +258,7 @@ DEFAULT_START = "4"        # 桃園
 DEFAULT_DEST = "12"        # 左營
 DEFAULT_TIME_HHMM = "18:40"
 DEFAULT_ID = "E122973276"
+BUILD_TAG = "2026-04-27-d5ace6b+spinner-cache"
 
 
 def render_form() -> None:
@@ -390,16 +397,16 @@ def render_querying() -> None:
     captcha = ""
     if not f.get("manual_captcha"):
         try:
-            with st.spinner("自動辨識驗證碼中…"):
-                solver = CaptchaSolver()
-                if solver.available:
+            solver = get_captcha_solver()
+            if solver.available:
+                with st.spinner("自動辨識驗證碼中…"):
                     captcha = solver.solve(captcha_bytes)
-                    log_event("info", f"自動辨識: {captcha or '(空)'} "
-                                      f"(長度 {len(captcha)})")
-                else:
-                    log_event("warn", "ddddocr 不可用，需手動輸入驗證碼")
+                log_event("info", f"自動辨識: {captcha or '(空)'} "
+                                  f"(長度 {len(captcha)})")
+            else:
+                log_event("warn", "ddddocr 不可用，需手動輸入驗證碼")
         except Exception as e:
-            log_event("error", f"驗證碼辨識例外: {e}")
+            log_event("error", f"驗證碼辨識例外: {type(e).__name__}: {e}")
 
     if captcha and len(captcha) == CAPTCHA_LEN:
         try:
@@ -719,6 +726,7 @@ def main() -> None:
     if not render_auth_gate():
         return
     st.title("🚄 台灣高鐵訂票")
+    st.caption(f"build: `{BUILD_TAG}`")
     render_logout()
     render_sidebar()
     render_diagnostics()
