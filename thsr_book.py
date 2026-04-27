@@ -141,7 +141,6 @@ class THSRBooker:
             radio = label.find("input", attrs={"name": "TrainQueryDataViewPanel:TrainGroup"})
             if not radio:
                 continue
-            cols = label.find_all(class_=re.compile(r"column\d"))
             train_no = label.find(class_="column1")
             depart = label.find(class_="column3")
             arrive = label.find(class_="column4")
@@ -152,6 +151,7 @@ class THSRBooker:
                 "depart": _text(depart),
                 "arrive": _text(arrive),
                 "duration": _text(duration),
+                "sold_out": _is_sold_out(label, radio),
             })
 
         if not trains:
@@ -160,6 +160,7 @@ class THSRBooker:
                     "value": radio.get("value", ""),
                     "train_no": radio.get("value", ""),
                     "depart": "", "arrive": "", "duration": "",
+                    "sold_out": radio.has_attr("disabled"),
                 })
         return trains
 
@@ -247,6 +248,66 @@ def _is_captcha_error(msg: str) -> bool:
     return any(k in msg for k in keywords)
 
 
+def _is_sold_out(label, radio) -> bool:
+    cls = " ".join(label.get("class") or []).lower()
+    if "disable" in cls or "soldout" in cls or "sold-out" in cls:
+        return True
+    if radio is not None and radio.has_attr("disabled"):
+        return True
+    text = label.get_text(" ", strip=True)
+    for marker in ("已售完", "客滿", "售完", "Sold Out", "Sold out"):
+        if marker in text:
+            return True
+    return False
+
+
+def _hhmm_to_min(hhmm: str) -> int:
+    s = hhmm.replace(":", "")
+    if not re.fullmatch(r"\d{3,4}", s):
+        raise ValueError(f"時間格式錯誤 (需 HH:MM 或 HHMM): {hhmm!r}")
+    s = s.zfill(4)
+    h, m = int(s[:2]), int(s[2:])
+    if h > 23 or m > 59:
+        raise ValueError(f"時間超出範圍: {hhmm!r}")
+    return h * 60 + m
+
+
+def _depart_minutes(t: dict) -> Optional[int]:
+    s = (t.get("depart") or "").strip()
+    m = re.search(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def filter_trains(trains: list[dict], from_min: Optional[int],
+                  until_min: Optional[int]) -> list[dict]:
+    out = []
+    for t in trains:
+        if t.get("sold_out"):
+            continue
+        dm = _depart_minutes(t)
+        if dm is None:
+            out.append(t)
+            continue
+        if from_min is not None and dm < from_min:
+            continue
+        if until_min is not None and dm > until_min:
+            continue
+        out.append(t)
+    return out
+
+
+def _sleep_with_countdown(seconds: int, prefix: str = "  ") -> None:
+    import time
+    for remaining in range(seconds, 0, -1):
+        sys.stdout.write(f"\r{prefix}{remaining:>3}s 後重新刷票…   ")
+        sys.stdout.flush()
+        time.sleep(1)
+    sys.stdout.write("\r" + " " * 40 + "\r")
+    sys.stdout.flush()
+
+
 class CaptchaSolver:
     """ddddocr 包裝；若未安裝則 available=False。"""
 
@@ -299,6 +360,61 @@ def prompt(msg: str, default: Optional[str] = None) -> str:
     return val or (default or "")
 
 
+def query_for_trains(booker: "THSRBooker", solver: Optional["CaptchaSolver"],
+                     query_params: dict, args, silent: bool = False) -> list[dict]:
+    """載入頁面 → (自動)解驗證碼 → 送出查詢；驗證碼錯誤時重試。
+
+    silent=True 時用於背景刷票：永遠走自動辨識，不開圖、不阻塞使用者。
+    """
+    use_solver = bool(solver and solver.available and not args.manual_captcha)
+    auto_only = silent and use_solver
+    last_err: Optional[str] = None
+
+    for attempt in range(1, max(1, args.captcha_retries) + 1):
+        captcha_bytes = booker.step1_load()
+        captcha = ""
+        if use_solver:
+            captcha = solver.solve(captcha_bytes)
+            if not silent:
+                if captcha:
+                    extra = (f"  (長度 {len(captcha)} ≠ {CAPTCHA_LEN})"
+                             if len(captcha) != CAPTCHA_LEN else "")
+                    print(f"  自動辨識: {captcha}{extra}")
+                else:
+                    print("  自動辨識失敗。")
+
+        valid = bool(captcha) and len(captcha) == CAPTCHA_LEN
+
+        if not valid and not auto_only:
+            show_captcha(captcha_bytes)
+            hint = f" (Enter 接受 [{captcha}])" if captcha else ""
+            user_in = input(f"請輸入驗證碼{hint}: ").strip()
+            if user_in:
+                captcha = user_in.upper()
+
+        if args.confirm_captcha and not auto_only and captcha:
+            user_in = input(f"確認驗證碼 [{captcha}] (Enter 接受): ").strip()
+            if user_in:
+                captcha = user_in.upper()
+
+        if not captcha:
+            if auto_only:
+                continue
+            raise RuntimeError("驗證碼不可為空")
+
+        try:
+            return booker.step1_submit(query_params, captcha)
+        except RuntimeError as e:
+            last_err = str(e)
+            if _is_captcha_error(last_err) and attempt < args.captcha_retries:
+                if not silent:
+                    print(f"  驗證碼錯誤，重試中… ({last_err})")
+                continue
+            raise
+
+    raise RuntimeError(f"驗證碼重試達上限: {last_err}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="台灣高鐵訂票 CLI",
@@ -308,7 +424,17 @@ def main() -> int:
     parser.add_argument("--start", help="出發站 (代碼或站名，例: 2 或 台北)")
     parser.add_argument("--dest", help="到達站")
     parser.add_argument("--date", help="出發日期 YYYY/MM/DD")
-    parser.add_argument("--time", help="出發時間，例: 1230P / 0830A")
+    parser.add_argument("--time", help="出發時間 (查詢起點)，例: 1230P / 0830A")
+    parser.add_argument("--from-time", dest="time_from",
+                        help="可接受最早出發時間 HH:MM (篩選用，例 09:00)")
+    parser.add_argument("--until", dest="time_until",
+                        help="可接受最晚出發時間 HH:MM (篩選用，例 11:00)")
+    parser.add_argument("--retry", action="store_true",
+                        help="若無符合條件車次，每隔幾秒重新刷票直到搶到")
+    parser.add_argument("--retry-interval", type=int, default=10,
+                        help="刷票間隔秒數 (預設 10)")
+    parser.add_argument("--retry-max", type=int, default=0,
+                        help="最大刷票次數，0 = 無限 (預設 0)")
     parser.add_argument("--adults", type=int, default=1, help="全票人數 (預設 1)")
     parser.add_argument("--id", dest="id_number", help="身分證或護照號碼")
     parser.add_argument("--phone", help="手機 (選填)")
@@ -343,73 +469,90 @@ def main() -> int:
     phone = args.phone if args.phone is not None else prompt("手機 (選填)", "")
     email = args.email if args.email is not None else prompt("Email (選填)", "")
 
+    try:
+        from_min = _hhmm_to_min(args.time_from) if args.time_from else None
+        until_min = _hhmm_to_min(args.time_until) if args.time_until else None
+    except ValueError as e:
+        print(f"錯誤: {e}", file=sys.stderr)
+        return 2
+
     booker = THSRBooker()
     solver = None if args.manual_captcha else CaptchaSolver()
     if solver and not solver.available and not args.manual_captcha:
         print("[提示] 未安裝 ddddocr，將改為手動輸入驗證碼。"
               " 安裝: pip install ddddocr")
+    if args.retry and (not solver or not solver.available) and not args.manual_captcha:
+        print("[警告] 自動刷票模式建議搭配 ddddocr 使用，否則每輪都會要求手動輸入驗證碼。")
+
+    query_params = {
+        "start": start, "dest": dest,
+        "date": date_str, "time": time_str,
+        "adults": adults,
+    }
 
     try:
-        trains = []
-        last_err: Optional[str] = None
-        for attempt in range(1, max(1, args.captcha_retries) + 1):
-            print(f"\n[1/3] 載入查詢頁與驗證碼… (第 {attempt} 次)")
-            captcha_bytes = booker.step1_load()
+        chosen: Optional[dict] = None
+        poll_count = 0
+        while True:
+            poll_count += 1
+            silent = args.retry and poll_count > 1
+            tag = f" (刷票 #{poll_count})" if args.retry else ""
+            print(f"\n[1/3] 載入查詢頁與驗證碼{tag}…")
 
-            captcha = ""
-            if solver and solver.available:
-                captcha = solver.solve(captcha_bytes)
-                if captcha:
-                    print(f"  自動辨識: {captcha}"
-                          + (f"  (長度 {len(captcha)} ≠ {CAPTCHA_LEN}，可能不準)"
-                             if len(captcha) != CAPTCHA_LEN else ""))
-                else:
-                    print("  自動辨識失敗。")
-
-            need_manual = (not captcha) or args.confirm_captcha or len(captcha) != CAPTCHA_LEN
-            if need_manual:
-                show_captcha(captcha_bytes)
-                hint = f" (Enter 接受 [{captcha}])" if captcha else ""
-                user_in = input(f"請輸入驗證碼{hint}: ").strip()
-                if user_in:
-                    captcha = user_in.upper()
-            if not captcha:
-                print("錯誤: 驗證碼不可為空。", file=sys.stderr)
-                return 2
-
-            print("\n[2/3] 查詢車次…")
             try:
-                trains = booker.step1_submit({
-                    "start": start, "dest": dest,
-                    "date": date_str, "time": time_str,
-                    "adults": adults,
-                }, captcha)
-                break
+                trains = query_for_trains(booker, solver, query_params, args,
+                                           silent=silent)
             except RuntimeError as e:
-                msg = str(e)
-                last_err = msg
-                if _is_captcha_error(msg) and attempt < args.captcha_retries:
-                    print(f"  驗證碼錯誤，重試中… ({msg})")
+                if args.retry and poll_count > 1:
+                    print(f"  本輪查詢失敗: {e}")
+                    if args.retry_max and poll_count >= args.retry_max:
+                        print("已達最大刷票次數。", file=sys.stderr)
+                        return 1
+                    _sleep_with_countdown(args.retry_interval)
                     continue
                 raise
-        else:
-            print(f"驗證碼重試達上限: {last_err}", file=sys.stderr)
-            return 1
 
-        if not trains:
-            print("找不到任何符合條件的車次。", file=sys.stderr)
-            return 1
+            print(f"[2/3] 共取得 {len(trains)} 筆車次。")
+            available = filter_trains(trains, from_min, until_min)
+            sold = [t for t in trains if t.get("sold_out")]
+            if sold and not args.retry:
+                print(f"  其中 {len(sold)} 班已售完。")
 
-        print("\n可選車次:")
-        for i, t in enumerate(trains, 1):
-            print(f"  [{i}] {t['train_no']:>8}  {t['depart']} → {t['arrive']}  ({t['duration']})")
-        choice_str = prompt(f"請選擇車次 1-{len(trains)}", "1")
-        try:
-            choice = int(choice_str)
-            chosen = trains[choice - 1]
-        except (ValueError, IndexError):
-            print("無效的車次選擇。", file=sys.stderr)
-            return 2
+            if available:
+                if args.retry and poll_count > 1:
+                    print(f"\n刷到車票！(第 {poll_count} 次刷新)")
+                print("\n可選車次:")
+                for i, t in enumerate(available, 1):
+                    print(f"  [{i}] {t['train_no']:>8}  "
+                          f"{t['depart']} → {t['arrive']}  ({t['duration']})")
+                if args.retry and poll_count > 1:
+                    chosen = available[0]
+                    print(f"自動選擇: {chosen['train_no']}  "
+                          f"{chosen['depart']} → {chosen['arrive']}")
+                else:
+                    choice_str = prompt(f"請選擇車次 1-{len(available)}", "1")
+                    try:
+                        choice = int(choice_str)
+                        chosen = available[choice - 1]
+                    except (ValueError, IndexError):
+                        print("無效的車次選擇。", file=sys.stderr)
+                        return 2
+                break
+
+            if not args.retry:
+                print("找不到符合條件的可訂車次 (可能已售完或不在時間範圍內)。",
+                      file=sys.stderr)
+                return 1
+
+            if args.retry_max and poll_count >= args.retry_max:
+                print(f"已達最大刷票次數 ({args.retry_max})，仍無票可訂。",
+                      file=sys.stderr)
+                return 1
+
+            print(f"  時間範圍內無可訂車次 (售完 {len(sold)}/總 {len(trains)})，"
+                  f"{args.retry_interval}s 後重試… (Ctrl+C 取消)")
+            _sleep_with_countdown(args.retry_interval)
+
         booker.step2_submit(chosen["value"])
 
         print("\n[3/3] 提交乘客資料…")
