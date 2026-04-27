@@ -24,6 +24,7 @@ from thsr_book import (
     _is_captcha_error,
     filter_trains,
 )
+import thsr_auth as auth
 import thsr_storage as store
 
 
@@ -47,6 +48,8 @@ DEFAULTS = {
     "vault": None,
     "show_card": None,
     "stop_requested": False,
+    "logged_in": False,
+    "username": "",
 }
 
 
@@ -61,6 +64,62 @@ def reset_booking() -> None:
               "available_trains", "chosen_train", "poll_count", "result",
               "error_msg", "stop_requested"):
         st.session_state[k] = DEFAULTS[k]
+
+
+# ----- auth gate -----
+
+def render_auth_gate() -> bool:
+    """Return True if the user is authenticated; otherwise render
+    setup/login form and return False."""
+    if st.session_state.get("logged_in"):
+        return True
+
+    use_env = auth.env_credentials() is not None
+    has_file = auth.auth_exists()
+
+    if not use_env and not has_file:
+        st.title("🔐 初次設定")
+        st.info("請建立管理員帳號 (PBKDF2-SHA256 雜湊保存於本機)")
+        u = st.text_input("使用者名稱", key="setup_user")
+        p1 = st.text_input("密碼", type="password", key="setup_pw1")
+        p2 = st.text_input("確認密碼", type="password", key="setup_pw2")
+        if st.button("建立並登入", type="primary", use_container_width=True):
+            if not u.strip() or not p1:
+                st.error("帳號密碼不可為空")
+            elif p1 != p2:
+                st.error("兩次密碼不符")
+            elif len(p1) < 6:
+                st.error("密碼至少 6 字元")
+            else:
+                auth.save_auth(u.strip(), p1)
+                st.session_state.logged_in = True
+                st.session_state.username = u.strip()
+                st.rerun()
+        return False
+
+    st.title("🔐 登入")
+    if use_env:
+        st.caption("帳密由環境變數 THSR_AUTH_USER / THSR_AUTH_PASS 提供")
+    u = st.text_input("使用者", key="login_user")
+    p = st.text_input("密碼", type="password", key="login_pw")
+    if st.button("登入", type="primary", use_container_width=True):
+        if auth.authenticate(u, p):
+            st.session_state.logged_in = True
+            st.session_state.username = u
+            st.rerun()
+        else:
+            st.error("帳號或密碼錯誤")
+    return False
+
+
+def render_logout() -> None:
+    with st.sidebar:
+        st.caption(f"已登入：{st.session_state.username}")
+        if st.button("登出", use_container_width=True):
+            for k in ("logged_in", "username", "vault"):
+                st.session_state[k] = DEFAULTS[k]
+            st.rerun()
+        st.divider()
 
 
 # ----- sidebar: profiles + cards -----
@@ -514,7 +573,10 @@ def main() -> None:
                        initial_sidebar_state="auto",
                        menu_items={"About": "Taiwan HSR booking helper"})
     init_state()
+    if not render_auth_gate():
+        return
     st.title("🚄 台灣高鐵訂票")
+    render_logout()
     render_sidebar()
     render_show_card()
 

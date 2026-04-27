@@ -10,4 +10,8 @@ services:
     environment:
       - THSR_DATA_DIR=/data
       - TZ=Asia/Taipei
+      # Optional: bake credentials in via env (otherwise the first visit
+      # asks you to create an account). Uncomment and set both:
+      # - THSR_AUTH_USER=admin
+      # - THSR_AUTH_PASS=change-me
     restart: unless-stopped
