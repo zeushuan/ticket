@@ -1,0 +1,13 @@
+services:
+  thsr:
+    build: .
+    image: thsr-booking:latest
+    container_name: thsr-booking
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/data
+    environment:
+      - THSR_DATA_DIR=/data
+      - TZ=Asia/Taipei
+    restart: unless-stopped

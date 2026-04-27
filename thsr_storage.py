@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 
-CONFIG_DIR = Path(os.path.expanduser("~/.thsr"))
+CONFIG_DIR = Path(os.environ.get("THSR_DATA_DIR") or os.path.expanduser("~/.thsr"))
 PROFILES_PATH = CONFIG_DIR / "profiles.json"
 CARDS_PATH = CONFIG_DIR / "cards.enc"
 CARD_SALT_PATH = CONFIG_DIR / "cards.salt"
