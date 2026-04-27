@@ -71,9 +71,15 @@ class THSRBooker:
             "User-Agent": self.USER_AGENT,
             "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
         })
+        self.session.hooks["response"] = [self._capture_response]
         self.s1_action: Optional[str] = None
         self.s2_action: Optional[str] = None
         self.s3_action: Optional[str] = None
+        self.last_response: Optional[requests.Response] = None
+
+    def _capture_response(self, r, *args, **kwargs):
+        self.last_response = r
+        return r
 
     def step1_load(self) -> bytes:
         r = self.session.get(BOOKING_PAGE)

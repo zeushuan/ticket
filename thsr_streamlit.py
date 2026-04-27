@@ -1,14 +1,8 @@
-"""台灣高鐵訂票 - Streamlit Web App.
-
-部署在 Synology NAS 容器，手機瀏覽器即可訂票。
-- 支援 Profile (記住車站/日期/乘客) 與本地加密信用卡保險庫
-- ddddocr 自動辨識驗證碼，失敗時頁面顯示圖片讓使用者輸入
-- 自動刷票：時間範圍內無票時定時重新查詢
-- 訂位成功後給付款連結，使用者在手機瀏覽器手動填寫信用卡完成付款
-"""
+"""台灣高鐵訂票 - Streamlit Web App."""
 from __future__ import annotations
 
 import time
+import traceback
 from datetime import date
 from typing import Optional
 
@@ -50,7 +44,17 @@ DEFAULTS = {
     "stop_requested": False,
     "logged_in": False,
     "username": "",
+    "activity": [],          # list of (ts, level, msg)
+    "last_traceback": "",
 }
+
+
+def log_event(level: str, msg: str) -> None:
+    """Append to in-page activity log; level in {info, warn, error, success}."""
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.activity.append((ts, level, msg))
+    if len(st.session_state.activity) > 200:
+        st.session_state.activity = st.session_state.activity[-200:]
 
 
 def init_state() -> None:
@@ -62,7 +66,7 @@ def init_state() -> None:
 def reset_booking() -> None:
     for k in ("step", "booker", "captcha_bytes", "captcha_hint", "trains",
               "available_trains", "chosen_train", "poll_count", "result",
-              "error_msg", "stop_requested"):
+              "error_msg", "stop_requested", "last_traceback"):
         st.session_state[k] = DEFAULTS[k]
 
 
@@ -329,6 +333,12 @@ def render_form() -> None:
         st.session_state.booker = THSRBooker()
         st.session_state.poll_count = 0
         st.session_state.step = "querying"
+        log_event(
+            "info",
+            f"開始訂票 {start[0]}→{dest[0]}  {date_str} {time_str}  "
+            f"窗口 {time_from or '*'}~{time_until or '*'}  "
+            f"retry={retry}",
+        )
         st.rerun()
 
 
@@ -345,33 +355,49 @@ def render_querying() -> None:
     f = st.session_state.form_data
     booker: THSRBooker = st.session_state.booker
 
-    st.info(f"刷票 #{st.session_state.poll_count + 1}: 載入查詢頁與驗證碼…")
+    poll_n = st.session_state.poll_count + 1
+    st.info(f"刷票 #{poll_n}: 載入查詢頁與驗證碼…")
     st.button("⏹ 取消", on_click=_cancel)
+    log_event("info", f"刷票 #{poll_n}: 載入查詢頁")
 
     try:
         captcha_bytes = booker.step1_load()
-    except (requests.HTTPError, requests.ConnectionError) as e:
-        _to_error(f"載入頁面失敗: {e}")
+    except Exception as e:
+        log_event("error", f"載入頁面失敗: {e}")
+        _to_error(f"載入頁面失敗: {e}", exc=e)
         return
 
     captcha = ""
     if not f.get("manual_captcha"):
-        solver = CaptchaSolver()
-        if solver.available:
-            captcha = solver.solve(captcha_bytes)
+        try:
+            solver = CaptchaSolver()
+            if solver.available:
+                captcha = solver.solve(captcha_bytes)
+                log_event("info", f"自動辨識: {captcha or '(空)'} "
+                                  f"(長度 {len(captcha)})")
+            else:
+                log_event("warn", "ddddocr 不可用，需手動輸入驗證碼")
+        except Exception as e:
+            log_event("error", f"驗證碼辨識例外: {e}")
 
     if captcha and len(captcha) == CAPTCHA_LEN:
         try:
             trains = booker.step1_submit(_query_params(f), captcha)
+            log_event("success", f"查詢成功，回傳 {len(trains)} 班車")
             _post_query(trains)
             return
         except RuntimeError as e:
             if not _is_captcha_error(str(e)):
-                _to_error(f"查詢失敗: {e}")
+                log_event("error", f"查詢失敗: {e}")
+                _to_error(f"查詢失敗: {e}", exc=e)
                 return
-            # captcha was wrong, fall through to manual
+            log_event("warn", f"驗證碼錯誤: {e}")
+        except Exception as e:
+            log_event("error", f"查詢例外: {e}")
+            _to_error(f"查詢例外: {e}", exc=e)
+            return
 
-    # need user input
+    log_event("info", "需要使用者輸入驗證碼")
     st.session_state.captcha_bytes = captcha_bytes
     st.session_state.captcha_hint = captcha
     st.session_state.step = "captcha"
@@ -389,17 +415,24 @@ def render_captcha() -> None:
         if not val:
             st.warning("請輸入")
             return
+        log_event("info", f"使用者輸入驗證碼: {val}")
         try:
             booker: THSRBooker = st.session_state.booker
             trains = booker.step1_submit(_query_params(st.session_state.form_data), val)
+            log_event("success", f"查詢成功，回傳 {len(trains)} 班車")
             _post_query(trains)
         except RuntimeError as e:
             if _is_captcha_error(str(e)):
+                log_event("warn", f"驗證碼錯誤: {e}")
                 st.warning("驗證碼錯誤，重新載入…")
                 st.session_state.step = "querying"
                 st.rerun()
             else:
-                _to_error(f"查詢失敗: {e}")
+                log_event("error", f"查詢失敗: {e}")
+                _to_error(f"查詢失敗: {e}", exc=e)
+        except Exception as e:
+            log_event("error", f"查詢例外: {e}")
+            _to_error(f"查詢例外: {e}", exc=e)
     if cols[1].button("取消", use_container_width=True):
         _cancel()
         st.rerun()
@@ -420,6 +453,8 @@ def _post_query(trains: list) -> None:
     until_min = _hhmm_to_min(f["time_until"]) if f.get("time_until") else None
     avail = filter_trains(trains, from_min, until_min)
     st.session_state.available_trains = avail
+    sold = sum(1 for t in trains if t.get("sold_out"))
+    log_event("info", f"過濾後 {len(avail)} 班可訂 (總 {len(trains)}, 售完 {sold})")
 
     if avail:
         st.session_state.step = "trains"
@@ -428,8 +463,7 @@ def _post_query(trains: list) -> None:
 
     st.session_state.poll_count += 1
     if not f.get("retry"):
-        _to_error(f"時間範圍內無可訂票 (查到 {len(trains)} 班、售完 "
-                  f"{sum(1 for t in trains if t.get('sold_out'))} 班)。")
+        _to_error(f"時間範圍內無可訂票 (查到 {len(trains)} 班、售完 {sold} 班)。")
         return
 
     if f.get("retry_max") and st.session_state.poll_count >= f["retry_max"]:
@@ -479,19 +513,26 @@ def render_submitting() -> None:
     booker: THSRBooker = st.session_state.booker
     chosen = st.session_state.chosen_train
     st.info(f"確認車次 {chosen['train_no']}…")
+    log_event("info", f"確認車次 {chosen['train_no']} ({chosen['depart']} → {chosen['arrive']})")
     try:
         booker.step2_submit(chosen["value"])
         st.info("送出乘客資料…")
+        log_event("info", "送出乘客資料")
         result = booker.step3_submit({
             "id_number": f["id_number"],
             "phone": f["phone"],
             "email": f["email"],
         })
+        log_event("success", f"訂位成功 PNR={result.get('pnr') or '?'}")
         st.session_state.result = result
         st.session_state.step = "done"
         st.rerun()
     except RuntimeError as e:
-        _to_error(f"訂位失敗: {e}")
+        log_event("error", f"訂位失敗: {e}")
+        _to_error(f"訂位失敗: {e}", exc=e)
+    except Exception as e:
+        log_event("error", f"訂位例外: {e}")
+        _to_error(f"訂位例外: {e}", exc=e)
 
 
 def render_done() -> None:
@@ -528,6 +569,21 @@ def render_done() -> None:
 
 def render_error() -> None:
     st.error(st.session_state.error_msg)
+    booker = st.session_state.get("booker")
+    if booker is not None and getattr(booker, "last_response", None) is not None:
+        r = booker.last_response
+        with st.expander("最後一次 HTTP 回應"):
+            st.code(
+                f"{r.request.method} {r.url}\n→ HTTP {r.status_code}  "
+                f"({len(r.content):,} bytes)",
+                language="text",
+            )
+            preview = r.text[:1500] if r.text else ""
+            if preview:
+                st.code(preview, language="html")
+    if st.session_state.last_traceback:
+        with st.expander("Traceback"):
+            st.code(st.session_state.last_traceback, language="python")
     if st.button("⬅ 回表單", use_container_width=True):
         reset_booking()
         st.rerun()
@@ -555,14 +611,77 @@ def render_show_card() -> None:
 
 # ----- helpers -----
 
-def _to_error(msg: str) -> None:
+def _to_error(msg: str, exc: Optional[BaseException] = None) -> None:
     st.session_state.error_msg = msg
+    if exc is not None:
+        st.session_state.last_traceback = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
     st.session_state.step = "error"
     st.rerun()
 
 
 def _cancel() -> None:
     st.session_state.stop_requested = True
+
+
+# ----- diagnostics + activity log -----
+
+def render_diagnostics() -> None:
+    with st.sidebar.expander("🔧 系統狀態 / 診斷"):
+        try:
+            import ddddocr  # noqa: F401
+            st.write("✅ ddddocr 可用 (自動驗證碼)")
+        except Exception as e:
+            st.write(f"❌ ddddocr 不可用: {e}")
+
+        try:
+            import cryptography  # noqa: F401
+            st.write("✅ cryptography 可用 (加密信用卡)")
+        except Exception as e:
+            st.write(f"❌ cryptography 不可用: {e}")
+
+        try:
+            from PIL import Image as _PILImage  # noqa: F401
+            st.write("✅ Pillow 可用")
+        except Exception as e:
+            st.write(f"❌ Pillow 不可用: {e}")
+
+        st.write(f"📁 資料目錄: `{store.CONFIG_DIR}`")
+        st.write(f"📑 Profile 數: {len(store.list_profiles())}")
+        st.write(f"💳 卡片庫: {'存在' if store.vault_exists() else '尚未建立'}")
+        st.write(f"🔐 Auth 設定: "
+                 f"{'env vars' if auth.env_credentials() else ('檔案' if auth.auth_exists() else '尚未建立')}")
+
+        if st.button("測試 THSR 連線"):
+            try:
+                r = requests.get(
+                    "https://irs.thsrc.com.tw/IMINT/?locale=tw",
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                st.write(f"HTTP {r.status_code} • {len(r.content):,} bytes")
+                if r.status_code == 200:
+                    st.success("✅ 連線正常")
+                else:
+                    st.warning(f"非預期狀態碼: {r.status_code}")
+            except Exception as e:
+                st.error(f"連線失敗: {type(e).__name__}: {e}")
+
+
+def render_activity_log() -> None:
+    n = len(st.session_state.activity)
+    label = f"📜 活動記錄 ({n})"
+    with st.expander(label, expanded=(n > 0 and st.session_state.step == "error")):
+        if not st.session_state.activity:
+            st.caption("(尚無記錄)")
+            return
+        icons = {"info": "ℹ️", "warn": "⚠️", "error": "❌", "success": "✅"}
+        for ts, level, msg in reversed(st.session_state.activity[-100:]):
+            st.write(f"`{ts}` {icons.get(level, '•')} {msg}")
+        if st.button("清除記錄"):
+            st.session_state.activity = []
+            st.rerun()
 
 
 # ----- entry -----
@@ -578,6 +697,7 @@ def main() -> None:
     st.title("🚄 台灣高鐵訂票")
     render_logout()
     render_sidebar()
+    render_diagnostics()
     render_show_card()
 
     step = st.session_state.step
@@ -595,6 +715,9 @@ def main() -> None:
         render_done()
     elif step == "error":
         render_error()
+
+    st.divider()
+    render_activity_log()
 
 
 main()
