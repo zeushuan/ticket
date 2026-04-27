@@ -278,6 +278,34 @@ def _hhmm_to_min(hhmm: str) -> int:
     return h * 60 + m
 
 
+_THSR_TIME_RE = re.compile(r"^(0[1-9]|1[0-2])([0-5]\d)([ANP])$")
+
+
+def hhmm_to_thsr_table(value: str) -> str:
+    """把 'HH:MM' (24h) 或 '0630P' 格式轉成高鐵 toTimeTable 用的字串。
+
+    高鐵下拉只給 30 分鐘為單位的時段，會「向下取整」到最接近的 :00 / :30。
+    若已是 THSR 格式 (e.g. '0630P', '1200N', '1201A') 直接回傳。
+    """
+    v = (value or "").strip().upper()
+    if _THSR_TIME_RE.match(v) or v in ("1200N", "1201A"):
+        return v
+    minutes = _hhmm_to_min(v)
+    h, m = divmod(minutes, 60)
+    m = 30 if m >= 30 else 0
+    if h == 0 and m == 0:
+        return "1201A"
+    if h == 0 and m == 30:
+        return "0030A"
+    if h == 12 and m == 0:
+        return "1200N"
+    if h < 12:
+        return f"{h:02d}{m:02d}A"
+    if h == 12:
+        return f"12{m:02d}P"
+    return f"{(h - 12):02d}{m:02d}P"
+
+
 def _depart_minutes(t: dict) -> Optional[int]:
     s = (t.get("depart") or "").strip()
     m = re.search(r"(\d{1,2}):(\d{2})", s)

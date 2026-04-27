@@ -17,6 +17,7 @@ from thsr_book import (
     _hhmm_to_min,
     _is_captcha_error,
     filter_trains,
+    hhmm_to_thsr_table,
 )
 import thsr_auth as auth
 import thsr_storage as store
@@ -247,13 +248,19 @@ def render_card_vault() -> None:
 
 # ----- main form -----
 
+DEFAULT_START = "4"        # 桃園
+DEFAULT_DEST = "12"        # 左營
+DEFAULT_TIME_HHMM = "18:40"
+DEFAULT_ID = "E122973276"
+
+
 def render_form() -> None:
     st.subheader("行程")
     f = st.session_state.form_data
 
     cols = st.columns(2)
-    start_default = _station_index(f.get("start", "2"))
-    dest_default = _station_index(f.get("dest", "12"))
+    start_default = _station_index(f.get("start", DEFAULT_START))
+    dest_default = _station_index(f.get("dest", DEFAULT_DEST))
     with cols[0]:
         start = st.selectbox("出發站", STATION_OPTIONS, index=start_default,
                               format_func=lambda x: x[1], key="w_start")
@@ -266,8 +273,12 @@ def render_form() -> None:
         d_str = f.get("date") or date.today().strftime("%Y/%m/%d")
         date_str = st.text_input("日期 yyyy/mm/dd", value=d_str, key="w_date")
     with cols[1]:
-        time_str = st.text_input("查詢起點時間 (例 1230P)",
-                                 value=f.get("time") or "1230P", key="w_time")
+        time_str = st.text_input(
+            "出發時間 HH:MM (例 18:40)",
+            value=f.get("time") or DEFAULT_TIME_HHMM,
+            key="w_time",
+            help="24h 格式；高鐵以 30 分鐘為一個時段，自動向下取整。也可直接填 0630P。",
+        )
     with cols[2]:
         adults = st.number_input("全票人數", min_value=1, max_value=10,
                                   value=int(f.get("adults") or 1), key="w_adults")
@@ -283,7 +294,8 @@ def render_form() -> None:
     st.subheader("乘客")
     cols = st.columns(3)
     with cols[0]:
-        id_number = st.text_input("身分證/護照", value=f.get("id_number", ""),
+        id_number = st.text_input("身分證/護照",
+                                   value=f.get("id_number") or DEFAULT_ID,
                                    key="w_id_number")
     with cols[1]:
         phone = st.text_input("手機 (選填)", value=f.get("phone", ""), key="w_phone")
@@ -309,10 +321,16 @@ def render_form() -> None:
 
     st.divider()
     if st.button("🚄 開始訂票", type="primary", use_container_width=True):
-        # capture values
+        try:
+            thsr_time = hhmm_to_thsr_table(time_str)
+        except ValueError as e:
+            st.error(f"時間格式錯誤: {e}")
+            return
+        if thsr_time != time_str.strip().upper():
+            st.caption(f"已將 {time_str} 轉成高鐵時段 `{thsr_time}`")
         st.session_state.form_data = {
             "start": start[0], "dest": dest[0],
-            "date": date_str.strip(), "time": time_str.strip(),
+            "date": date_str.strip(), "time": thsr_time,
             "time_from": time_from.strip(), "time_until": time_until.strip(),
             "adults": int(adults),
             "id_number": id_number.strip(), "phone": phone.strip(),
