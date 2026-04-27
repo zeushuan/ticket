@@ -24,6 +24,9 @@ import requests
 from bs4 import BeautifulSoup
 
 
+CAPTCHA_RETRY_MAX = 5
+CAPTCHA_LEN = 4
+
 BASE_URL = "https://irs.thsrc.com.tw"
 BOOKING_PAGE = f"{BASE_URL}/IMINT/?locale=tw"
 
@@ -239,6 +242,40 @@ def _text(el) -> str:
     return el.get_text(strip=True) if el else ""
 
 
+def _is_captcha_error(msg: str) -> bool:
+    keywords = ("驗證碼", "captcha", "CAPTCHA", "securityCode", "認證碼")
+    return any(k in msg for k in keywords)
+
+
+class CaptchaSolver:
+    """ddddocr 包裝；若未安裝則 available=False。"""
+
+    def __init__(self) -> None:
+        self.available = False
+        self._ocr = None
+        try:
+            import logging
+            logging.getLogger("ddddocr").setLevel(logging.ERROR)
+            import ddddocr  # type: ignore
+            self._ocr = ddddocr.DdddOcr(show_ad=False)
+            self.available = True
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[警告] ddddocr 載入失敗，將使用手動輸入: {e}", file=sys.stderr)
+
+    def solve(self, image_bytes: bytes) -> str:
+        if not self.available or self._ocr is None:
+            return ""
+        try:
+            text = self._ocr.classification(image_bytes)
+        except Exception as e:
+            print(f"[警告] 驗證碼辨識失敗: {e}", file=sys.stderr)
+            return ""
+        text = re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+        return text
+
+
 def show_captcha(image_bytes: bytes) -> str:
     fd, path = tempfile.mkstemp(suffix=".png", prefix="thsr_captcha_")
     with os.fdopen(fd, "wb") as f:
@@ -277,6 +314,12 @@ def main() -> int:
     parser.add_argument("--phone", help="手機 (選填)")
     parser.add_argument("--email", help="Email (選填)")
     parser.add_argument("--no-browser", action="store_true", help="完成後不自動開啟付款頁")
+    parser.add_argument("--manual-captcha", action="store_true",
+                        help="不使用自動辨識，全部手動輸入驗證碼")
+    parser.add_argument("--confirm-captcha", action="store_true",
+                        help="自動辨識後仍要求人工確認 (按 Enter 接受 / 輸入新值覆寫)")
+    parser.add_argument("--captcha-retries", type=int, default=CAPTCHA_RETRY_MAX,
+                        help=f"驗證碼錯誤時最多重試次數 (預設 {CAPTCHA_RETRY_MAX})")
     args = parser.parse_args()
 
     print("=== 台灣高鐵訂票 / THSR Booking ===")
@@ -301,22 +344,58 @@ def main() -> int:
     email = args.email if args.email is not None else prompt("Email (選填)", "")
 
     booker = THSRBooker()
+    solver = None if args.manual_captcha else CaptchaSolver()
+    if solver and not solver.available and not args.manual_captcha:
+        print("[提示] 未安裝 ddddocr，將改為手動輸入驗證碼。"
+              " 安裝: pip install ddddocr")
 
     try:
-        print("\n[1/3] 載入查詢頁與驗證碼…")
-        captcha_bytes = booker.step1_load()
-        show_captcha(captcha_bytes)
-        captcha = input("請輸入驗證碼 (CAPTCHA): ").strip()
-        if not captcha:
-            print("錯誤: 驗證碼不可為空。", file=sys.stderr)
-            return 2
+        trains = []
+        last_err: Optional[str] = None
+        for attempt in range(1, max(1, args.captcha_retries) + 1):
+            print(f"\n[1/3] 載入查詢頁與驗證碼… (第 {attempt} 次)")
+            captcha_bytes = booker.step1_load()
 
-        print("\n[2/3] 查詢車次…")
-        trains = booker.step1_submit({
-            "start": start, "dest": dest,
-            "date": date_str, "time": time_str,
-            "adults": adults,
-        }, captcha)
+            captcha = ""
+            if solver and solver.available:
+                captcha = solver.solve(captcha_bytes)
+                if captcha:
+                    print(f"  自動辨識: {captcha}"
+                          + (f"  (長度 {len(captcha)} ≠ {CAPTCHA_LEN}，可能不準)"
+                             if len(captcha) != CAPTCHA_LEN else ""))
+                else:
+                    print("  自動辨識失敗。")
+
+            need_manual = (not captcha) or args.confirm_captcha or len(captcha) != CAPTCHA_LEN
+            if need_manual:
+                show_captcha(captcha_bytes)
+                hint = f" (Enter 接受 [{captcha}])" if captcha else ""
+                user_in = input(f"請輸入驗證碼{hint}: ").strip()
+                if user_in:
+                    captcha = user_in.upper()
+            if not captcha:
+                print("錯誤: 驗證碼不可為空。", file=sys.stderr)
+                return 2
+
+            print("\n[2/3] 查詢車次…")
+            try:
+                trains = booker.step1_submit({
+                    "start": start, "dest": dest,
+                    "date": date_str, "time": time_str,
+                    "adults": adults,
+                }, captcha)
+                break
+            except RuntimeError as e:
+                msg = str(e)
+                last_err = msg
+                if _is_captcha_error(msg) and attempt < args.captcha_retries:
+                    print(f"  驗證碼錯誤，重試中… ({msg})")
+                    continue
+                raise
+        else:
+            print(f"驗證碼重試達上限: {last_err}", file=sys.stderr)
+            return 1
+
         if not trains:
             print("找不到任何符合條件的車次。", file=sys.stderr)
             return 1
