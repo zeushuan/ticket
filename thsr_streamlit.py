@@ -258,7 +258,7 @@ DEFAULT_START = "4"        # 桃園
 DEFAULT_DEST = "12"        # 左營
 DEFAULT_TIME_HHMM = "18:40"
 DEFAULT_ID = "E122973276"
-BUILD_TAG = "2026-04-27-d5ace6b+spinner-cache"
+BUILD_TAG = "2026-04-28-geo-block-hint"
 
 
 def render_form() -> None:
@@ -389,6 +389,16 @@ def render_querying() -> None:
         with st.spinner("連線高鐵網站中…"):
             captcha_bytes = booker.step1_load()
         log_event("info", f"已取得驗證碼圖 ({len(captcha_bytes):,} bytes)")
+    except (requests.Timeout, requests.ConnectionError) as e:
+        msg = (
+            f"連不到高鐵: {type(e).__name__}\n\n"
+            "高鐵訂票站 (irs.thsrc.com.tw) 對非台灣 IP 常會封鎖或不回應。"
+            "若你部署在 Streamlit Cloud / 海外 VPS，請改在台灣 IP "
+            "(自家 Synology NAS、台灣電腦本機、台灣 VPS) 執行。"
+        )
+        log_event("error", f"連線逾時/失敗 (可能地區封鎖): {e}")
+        _to_error(msg, exc=e)
+        return
     except Exception as e:
         log_event("error", f"載入頁面失敗: {type(e).__name__}: {e}")
         _to_error(f"載入頁面失敗: {e}", exc=e)
@@ -688,7 +698,7 @@ def render_diagnostics() -> None:
             try:
                 r = requests.get(
                     "https://irs.thsrc.com.tw/IMINT/?locale=tw",
-                    timeout=10,
+                    timeout=15,
                     headers={"User-Agent": "Mozilla/5.0"},
                 )
                 st.write(f"HTTP {r.status_code} • {len(r.content):,} bytes")
@@ -696,6 +706,11 @@ def render_diagnostics() -> None:
                     st.success("✅ 連線正常")
                 else:
                     st.warning(f"非預期狀態碼: {r.status_code}")
+            except (requests.Timeout, requests.ConnectionError) as e:
+                st.error(
+                    f"❌ 連線失敗 ({type(e).__name__})\n\n"
+                    "高鐵站常擋海外 IP；請改在台灣 IP 環境 (NAS / 本機 / 台灣 VPS) 執行。"
+                )
             except Exception as e:
                 st.error(f"連線失敗: {type(e).__name__}: {e}")
 
